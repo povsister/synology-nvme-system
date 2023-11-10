@@ -12,37 +12,13 @@ import (
 	"time"
 
 	"github.com/povsister/synology-nvme-system/blockdev"
+	"github.com/povsister/synology-nvme-system/log"
 )
 
 /*
 # EXAMPLE
 # cat /proc/mdstat
 
-Personalities : [raid1] [raid0]
-md5 : active raid1 sata4p3[0]
-      17567603712 blocks super 1.2 [1/1] [U]
-
-md3 : active raid1 sata1p3[0] sata2p3[1]
-      17567603712 blocks super 1.2 [2/2] [UU]
-
-md4 : active raid1 sata3p3[0]
-      17567603712 blocks super 1.2 [1/1] [U]
-
-md2 : active raid0 nvme0n1p3[0] nvme1n1p3[1]
-      3979348608 blocks super 1.2 64k chunks [2/2] [UU]
-
-md1 : active raid1 nvme1n1p2[1] nvme0n1p2[0] sata1p2[2] sata4p2[5] sata3p2[4] sata2p2[3]
-      2097088 blocks [6/6] [UUUUUU]
-
-md0 : active raid1 nvme1n1p1[1] nvme0n1p1[0] sata1p1[2] sata4p1[5] sata3p1[4] sata2p1[3]
-      8388544 blocks [6/6] [UUUUUU]
-md0 : active raid1 nvme1n1p1[1] nvme0n1p1[0] sata1p1[2] sata4p1[6](F) sata3p1[4] sata2p1[3]
-      8388544 blocks [6/5] [UUUUU_]
-md0 : active raid1 sata4p1[6] nvme1n1p1[1] nvme0n1p1[0] sata1p1[2] sata3p1[4] sata2p1[3]
-      8388544 blocks [6/5] [UUUUU_]
-      [==>..................]  recovery = 11.7% (985024/8388544) finish=0.3min speed=328341K/sec
-
-unused devices: <none>
 
 /dev/md0:
         Version : 0.90
@@ -85,6 +61,11 @@ type MdStat struct {
 	allMds      []*Md
 }
 
+func NewMdStat() (*MdStat, error) {
+	m := &MdStat{}
+	return m, m.update()
+}
+
 type Md struct {
 	rawMdStat    [][]byte
 	MdNum        int64
@@ -96,7 +77,22 @@ type Md struct {
 	Devices      []*MdDevice
 }
 
+func (ms *MdStat) Print() {
+	log.Info().Int("count", len(ms.allMds)).Msg("Total mds")
+	for _, md := range ms.allMds {
+		for _, line := range md.rawMdStat {
+			log.Info().Str("name", md.MdName).Str("state", md.MdStatus).Msg(string(line))
+		}
+		for _, mdv := range md.Devices {
+			log.Info().Str("name", md.MdName).Str("device", mdv.PartitionName).
+				Str("state", mdv.DeviceStatus).
+				Msg(md.MdName + " " + md.RaidType)
+		}
+	}
+}
+
 type MdDevice struct {
+	Md *Md
 	blockdev.Partition
 	DeviceNumber int64
 	DeviceStatus string
@@ -107,43 +103,105 @@ func (ms *MdStat) update() error {
 	if err != nil {
 		return fmt.Errorf("err read /proc/mdstat: %w", err)
 	}
-	detectedMd := ms.splitMdstat(mdstat)
+	ms.allMds = ms.splitMdstat(mdstat)
+	for _, md := range ms.allMds {
+		md.update()
+	}
+
+	return nil
 }
 
 func (ms *MdStat) splitMdstat(stat []byte) (ret []*Md) {
 	r := bufio.NewReader(bytes.NewReader(stat))
 	var (
-		isSameMdProcessing = false
-		mdStarterRgx       = regexp.MustCompile(`^(md\d+)\s+:\s+`)
-		currentMd          *Md
+		mdStarterRgx = regexp.MustCompile(`^(md\d+)\s+:\s+`)
+		currentMd    *Md
 	)
+	endCurrentMd := func() {
+		if currentMd != nil {
+			ret = append(ret, currentMd)
+			currentMd = nil
+		}
+	}
 	for {
 		line, err := r.ReadBytes('\n')
 		if err == io.EOF {
 			break
 		}
+		line = bytes.Trim(line, "\n ")
 		// empty line
 		if len(line) == 0 {
 			// end this md processing. try next line
-			isSameMdProcessing = false
+			endCurrentMd()
 			continue
 		}
-		if !isSameMdProcessing {
-			if m := mdStarterRgx.FindSubmatch(line); len(m) > 0 {
-				isSameMdProcessing = true
-				mdNum, _ := strconv.ParseInt(strings.TrimLeft(string(m[1]), "md"), 10, 64)
-				currentMd = &Md{
-					MdNum:  mdNum,
-					MdName: string(m[1]),
-				}
-			} else {
-				// md pattern not matching. try next line
-				continue
+		if m := mdStarterRgx.FindSubmatch(line); len(m) > 0 {
+			// end this md processing.
+			endCurrentMd()
+			// new md
+			mdNum, _ := strconv.ParseInt(strings.TrimLeft(string(m[1]), "md"), 10, 64)
+			currentMd = &Md{
+				MdNum:  mdNum,
+				MdName: string(m[1]),
 			}
 		}
-		// read line data
-
+		if currentMd != nil {
+			// read line data
+			currentMd.rawMdStat = append(currentMd.rawMdStat, line)
+		}
 	}
+	endCurrentMd()
 
 	return
+}
+
+func (md *Md) update() {
+	if len(md.MdName) <= 0 {
+		return
+	}
+	mdDev := "/sys/block/" + md.MdName
+	allSlaves, err := os.ReadDir(mdDev + "/slaves")
+	if err != nil {
+		log.Error(err).Msg("can not read md slaves")
+		return
+	}
+	for _, sl := range allSlaves {
+		mdv := &MdDevice{
+			Md: md,
+			Partition: blockdev.Partition{
+				PartitionName: sl.Name(),
+				PartitionPath: "/dev/" + sl.Name(),
+			},
+		}
+		mdv.update()
+		md.Devices = append(md.Devices, mdv)
+	}
+
+	mdState, err := os.ReadFile(mdDev + "/md/array_state")
+	if err != nil {
+		log.Error(err).Msg("can not read md state")
+		return
+	}
+	md.MdStatus = strings.Trim(string(mdState), "\n")
+
+	mdLevel, err := os.ReadFile(mdDev + "/md/level")
+	if err != nil {
+		log.Error(err).Msg("can not read md level")
+		return
+	}
+	md.RaidType = strings.Trim(string(mdLevel), "\n")
+
+}
+
+func (mdv *MdDevice) update() {
+	mdvPath := "/sys/block/" + mdv.Md.MdName + "/md/" + strings.TrimLeft(strings.Replace(mdv.PartitionPath, "/", "-", -1), "-")
+
+	devState, err := os.ReadFile(mdvPath + "/state")
+	if err != nil {
+		log.Error(err).Str("mdDevice", mdv.PartitionPath).
+			Msg("can not read mdDevice state")
+		return
+	}
+	mdv.DeviceStatus = strings.Trim(string(devState), "\n")
+
 }
