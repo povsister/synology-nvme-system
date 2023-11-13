@@ -33,8 +33,8 @@ func init() {
 		}
 		defaultWriter = newMultiWriter(logFile)
 	}
-	zerolog.SetGlobalLevel(SetLogLevel)
-	defaultLogger = zerolog.New(defaultWriter).With().Timestamp().Logger()
+	zerolog.SetGlobalLevel(zerolog.TraceLevel)
+	defaultLogger = zerolog.New(defaultWriter).With().Timestamp().Logger().Level(zerolog.TraceLevel)
 	Flush = func() {
 		_ = logFile.Close()
 	}

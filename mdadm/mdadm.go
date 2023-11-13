@@ -70,7 +70,7 @@ type Md struct {
 	rawMdStat    [][]byte
 	MdNum        int64
 	MdName       string
-	MdStatus     string
+	MdState      string
 	RaidType     string
 	RaidDevsCnt  int64
 	TotalDevsCnt int64
@@ -81,11 +81,11 @@ func (ms *MdStat) Print() {
 	log.Info().Int("count", len(ms.allMds)).Msg("Total mds")
 	for _, md := range ms.allMds {
 		for _, line := range md.rawMdStat {
-			log.Info().Str("name", md.MdName).Str("state", md.MdStatus).Msg(string(line))
+			log.Info().Str("name", md.MdName).Str("state", md.MdState).Msg(string(line))
 		}
 		for _, mdv := range md.Devices {
 			log.Info().Str("name", md.MdName).Str("device", mdv.PartitionName).
-				Str("state", mdv.DeviceStatus).
+				Str("state", mdv.DeviceState).
 				Msg(md.MdName + " " + md.RaidType)
 		}
 	}
@@ -95,7 +95,7 @@ type MdDevice struct {
 	Md *Md
 	blockdev.Partition
 	DeviceNumber int64
-	DeviceStatus string
+	DeviceState  string
 }
 
 func (ms *MdStat) update() error {
@@ -140,6 +140,7 @@ func (ms *MdStat) splitMdstat(stat []byte) (ret []*Md) {
 			endCurrentMd()
 			// new md
 			mdNum, _ := strconv.ParseInt(strings.TrimLeft(string(m[1]), "md"), 10, 64)
+			log.Debug().Msgf("found new array %s", string(m[1]))
 			currentMd = &Md{
 				MdNum:  mdNum,
 				MdName: string(m[1]),
@@ -182,7 +183,7 @@ func (md *Md) update() {
 		log.Error(err).Msg("can not read md state")
 		return
 	}
-	md.MdStatus = strings.Trim(string(mdState), "\n")
+	md.MdState = strings.Trim(string(mdState), "\n")
 
 	mdLevel, err := os.ReadFile(mdDev + "/md/level")
 	if err != nil {
@@ -202,6 +203,6 @@ func (mdv *MdDevice) update() {
 			Msg("can not read mdDevice state")
 		return
 	}
-	mdv.DeviceStatus = strings.Trim(string(devState), "\n")
+	mdv.DeviceState = strings.Trim(string(devState), "\n")
 
 }
