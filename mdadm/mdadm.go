@@ -58,7 +58,7 @@ Working Devices : 6
 
 type MdStat struct {
 	updatedTime time.Time
-	allMds      []*Md
+	allMds      map[int64]*Md
 }
 
 func NewMdStat() (*MdStat, error) {
@@ -103,9 +103,11 @@ func (ms *MdStat) update() error {
 	if err != nil {
 		return fmt.Errorf("err read /proc/mdstat: %w", err)
 	}
-	ms.allMds = ms.splitMdstat(mdstat)
-	for _, md := range ms.allMds {
+	mds := ms.splitMdstat(mdstat)
+	ms.allMds = make(map[int64]*Md, len(mds))
+	for _, md := range mds {
 		md.update()
+		ms.allMds[md.MdNum] = md
 	}
 
 	return nil
@@ -194,6 +196,15 @@ func (md *Md) update() {
 
 }
 
+func (md *Md) IsClean() bool {
+	for _, st := range strings.Split(md.MdState, ",") {
+		if st == "clean" {
+			return true
+		}
+	}
+	return false
+}
+
 func (mdv *MdDevice) update() {
 	mdvPath := "/sys/block/" + mdv.Md.MdName + "/md/" + strings.TrimLeft(strings.Replace(mdv.PartitionPath, "/", "-", -1), "-")
 
@@ -205,4 +216,29 @@ func (mdv *MdDevice) update() {
 	}
 	mdv.DeviceState = strings.Trim(string(devState), "\n")
 
+}
+
+type Mdadm struct {
+	stat *MdStat
+}
+
+func NewMdadm() (*Mdadm, error) {
+	stat, err := NewMdStat()
+	if err != nil {
+		return nil, err
+	}
+	return &Mdadm{stat: stat}, nil
+}
+
+func (m *Mdadm) checkMd(ns ...int64) error {
+	for _, n := range ns {
+		md, ok := m.stat.allMds[n]
+		if !ok || md == nil {
+			return fmt.Errorf("md%d not found", n)
+		}
+		if !md.IsClean() {
+			return fmt.Errorf("md%d is not clean, current state: %s", n, md.MdState)
+		}
+	}
+	return nil
 }
